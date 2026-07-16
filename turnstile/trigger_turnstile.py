@@ -7,14 +7,23 @@ PID = 0x05DF
 
 # For V-USB HID relays, commands MUST go through send_feature_report.
 # Standard 8-byte format: [ReportID, Command, RelayIndex, Padding...]
-ON_PACKET  = [0x00, 0xFF, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]
+ON_PACKET = [0x00, 0xFF, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]
 OFF_PACKET = [0x00, 0xFD, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]
 
 try:
     # Open the HID device
     device = hid.device()
     device.open(VID, PID)
-    print("Successfully connected to www.dcttech.com USBRelay1!")
+
+    # Dynamically read the manufacturer and product strings from the USB chip
+    try:
+        manufacturer = device.get_manufacturer_string()
+        product = device.get_product_string()
+    except Exception:
+        manufacturer = "USB"
+        product = "Relay"
+
+    print(f"Successfully connected to {manufacturer} {product}!")
     print("---------------------------------------------")
     print("Commands: 'on' | 'off' | 'pulse' | 'exit'")
     print("---------------------------------------------")
