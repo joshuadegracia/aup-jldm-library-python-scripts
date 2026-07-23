@@ -1,9 +1,18 @@
 from datetime import datetime
+import os
+import re
 import tkinter as tk
 from tkinter import filedialog, messagebox
-import mysql.connector as mariadb
+
+# --- Pure Python MySQL/MariaDB Driver Fallback ---
+try:
+    import mysql.connector as mariadb
+    from mysql.connector import plugins
+except ImportError:
+    pass
+
 import openpyxl
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.styles import Alignment, Border, Font, Side
 import ttkbootstrap as tb
 from ttkbootstrap.constants import *
 from ttkbootstrap.widgets import DateEntry
@@ -12,9 +21,10 @@ from ttkbootstrap.widgets import DateEntry
 DB_CONFIG = {
     "host": "192.168.2.104",
     "port": 3308,
-    "user": "root",  # Update username if necessary
-    "password": "@dm!N2026",  # Update password
+    "user": "root",
+    "password": "@dm!N2026",
     "database": "jldmlibrary_stat",
+    "use_pure": True,  # FORCE Pure-Python implementation (Fixes missing DLL / native password plugin error in PyInstaller .exe)
 }
 
 
@@ -69,7 +79,8 @@ def fetch_date_bounds(section_id):
     except Exception:
         pass
 
-    return datetime(2023, 8, 1).date(), datetime(2023, 12, 31).date()
+    today = datetime.now().date()
+    return datetime(2023, 8, 1).date(), today
 
 
 def fetch_report_data(section_id, start_date, end_date):
@@ -112,7 +123,7 @@ def fetch_report_data(section_id, start_date, end_date):
 
 
 def format_dynamic_date_range(start_str, end_str):
-    """Formats date range (e.g., 'August to December 2023')."""
+    """Formats date range (e.g., 'August 2023 to July 2026')."""
     try:
         d1 = datetime.strptime(start_str, "%Y-%m-%d")
         d2 = datetime.strptime(end_str, "%Y-%m-%d")
@@ -123,12 +134,34 @@ def format_dynamic_date_range(start_str, end_str):
         return f"{start_str} to {end_str}"
 
 
+def sanitize_with_underscores(name):
+    """Replaces non-alphanumeric chars with underscores."""
+    cleaned = re.sub(r"[^a-zA-Z0-9]", "_", name)
+    cleaned = re.sub(r"_+", "_", cleaned)
+    return cleaned.strip("_")
+
+
+def create_underscore_tab_name(section_name):
+    """Creates an underscore-only tab name (max 31 chars for Excel)."""
+    clean_sec = sanitize_with_underscores(section_name)
+    clean_sec = clean_sec.replace("JLDM_Lib_", "").replace("JLDM_Lib", "")
+
+    suffix = "_Stats"
+    max_len = 31 - len(suffix)
+
+    if len(clean_sec) > max_len:
+        clean_sec = clean_sec[:max_len].strip("_")
+
+    return f"{clean_sec}{suffix}"
+
+
 class LibraryReportApp:
 
     def __init__(self, root):
         self.root = root
         self.root.title("JLDM Library Statistics Report")
-        self.root.geometry("520x780")
+        self.root.geometry("680x800")
+        self.root.configure(bg="#0F171E")
 
         # Fetch sections from DB
         self.sections_map = fetch_sections()
@@ -139,9 +172,9 @@ class LibraryReportApp:
         self.cached_section_name = ""
         self.cached_date_text = ""
 
-        # --- Top Action Bar / Controls ---
+        # --- Top Controls ---
         filter_card = tb.Labelframe(
-            root, text=" Report Controls ", bootstyle="primary", padding=15
+            root, text=" Report Controls ", bootstyle="info", padding=15
         )
         filter_card.pack(padx=15, pady=10, fill=X)
 
@@ -153,8 +186,8 @@ class LibraryReportApp:
             filter_card,
             values=list(self.sections_map.keys()),
             state="readonly",
-            bootstyle="primary",
-            width=25,
+            bootstyle="info",
+            width=28,
         )
 
         default_section = (
@@ -166,30 +199,62 @@ class LibraryReportApp:
         )
         self.combo_section.set(default_section)
         self.combo_section.grid(
-            row=0, column=1, columnspan=3, padx=5, pady=5, sticky=W
+            row=0, column=1, columnspan=5, padx=5, pady=5, sticky=W
         )
         self.combo_section.bind("<<ComboboxSelected>>", self.on_section_change)
 
         # Date Pickers
+        today_date = datetime.now().date()
+
+        # From Date
         tb.Label(
             filter_card, text="From:", font=("Helvetica", 10, "bold")
-        ).grid(row=1, column=0, padx=5, pady=5, sticky=W)
+        ).grid(row=1, column=0, padx=(5, 2), pady=5, sticky=W)
+
         self.cal_start = DateEntry(
-            filter_card, bootstyle="primary", dateformat="%Y-%m-%d", width=12
+            filter_card,
+            bootstyle="info",
+            dateformat="%Y-%m-%d",
+            width=12,
+            startdate=today_date,
         )
-        self.cal_start.grid(row=1, column=1, padx=5, pady=5)
+        self.cal_start.grid(row=1, column=1, padx=(0, 2), pady=5, sticky=W)
 
-        tb.Label(filter_card, text="To:", font=("Helvetica", 10, "bold")).grid(
-            row=1, column=2, padx=5, pady=5, sticky=W
+        btn_today_start = tb.Button(
+            filter_card,
+            text="Today",
+            bootstyle="secondary-outline",
+            command=self.set_start_to_today,
+            padding=(5, 2),
         )
+        btn_today_start.grid(row=1, column=2, padx=(2, 10), pady=5, sticky=W)
+
+        # To Date
+        tb.Label(
+            filter_card, text="To:", font=("Helvetica", 10, "bold")
+        ).grid(row=1, column=3, padx=(5, 2), pady=5, sticky=W)
+
         self.cal_end = DateEntry(
-            filter_card, bootstyle="primary", dateformat="%Y-%m-%d", width=12
+            filter_card,
+            bootstyle="info",
+            dateformat="%Y-%m-%d",
+            width=12,
+            startdate=today_date,
         )
-        self.cal_end.grid(row=1, column=3, padx=5, pady=5)
+        self.cal_end.grid(row=1, column=4, padx=(0, 2), pady=5, sticky=W)
 
-        # Buttons Panel
+        btn_today_end = tb.Button(
+            filter_card,
+            text="Today",
+            bootstyle="secondary-outline",
+            command=self.set_end_to_today,
+            padding=(5, 2),
+        )
+        btn_today_end.grid(row=1, column=5, padx=(2, 5), pady=5, sticky=W)
+
+        # Action Buttons
         btn_frame = tb.Frame(filter_card)
-        btn_frame.grid(row=2, column=0, columnspan=4, pady=(10, 0), sticky=EW)
+        btn_frame.grid(row=2, column=0, columnspan=6, pady=(10, 0), sticky=EW)
 
         btn_generate = tb.Button(
             btn_frame,
@@ -212,15 +277,50 @@ class LibraryReportApp:
         # Load date bounds
         self.load_date_bounds()
 
-        # --- Table Display Container ---
-        self.table_frame = tb.Frame(root, borderwidth=1, relief="solid")
-        self.table_frame.pack(padx=15, pady=10, fill=BOTH, expand=True)
+        # --- SOLID BLACK TERMINAL CONSOLE ---
+        terminal_container = tk.Frame(root, bg="#000000", padx=2, pady=2)
+        terminal_container.pack(padx=15, pady=(0, 15), fill=BOTH, expand=True)
 
-        self.table_frame.columnconfigure(0, weight=1)
-        self.table_frame.columnconfigure(1, weight=2)
-        self.table_frame.columnconfigure(2, weight=1)
+        scroll_y = tb.Scrollbar(terminal_container, orient=VERTICAL)
+        scroll_y.pack(side=RIGHT, fill=Y)
+
+        self.terminal = tk.Text(
+            terminal_container,
+            bg="#000000",
+            fg="#00FF66",
+            insertbackground="#00FF66",
+            selectbackground="#1F3A2B",
+            selectforeground="#00FF66",
+            font=("Consolas", 11, "bold"),
+            yscrollcommand=scroll_y.set,
+            wrap="none",
+            bd=0,
+            padx=15,
+            pady=15,
+            highlightthickness=1,
+            highlightbackground="#00FF66",
+        )
+        self.terminal.pack(side=LEFT, fill=BOTH, expand=True)
+        scroll_y.config(command=self.terminal.yview)
+
+        # Color Tags
+        self.terminal.tag_config("cyan", foreground="#00E5FF")
+        self.terminal.tag_config("yellow", foreground="#FFEA00")
+        self.terminal.tag_config("white", foreground="#F0F0F0")
+        self.terminal.tag_config("green_bold", foreground="#00FF66")
+        self.terminal.tag_config("red_bold", foreground="#FF3366")
 
         self.update_report()
+
+    def set_start_to_today(self):
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        self.cal_start.entry.delete(0, tk.END)
+        self.cal_start.entry.insert(0, today_str)
+
+    def set_end_to_today(self):
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        self.cal_end.entry.delete(0, tk.END)
+        self.cal_end.entry.insert(0, today_str)
 
     def load_date_bounds(self):
         sec_name = self.combo_section.get()
@@ -228,7 +328,6 @@ class LibraryReportApp:
 
         min_d, max_d = fetch_date_bounds(sec_id)
 
-        # Set calendar default selected values to the database range
         self.cal_start.entry.delete(0, tk.END)
         self.cal_start.entry.insert(0, min_d.strftime("%Y-%m-%d"))
 
@@ -239,40 +338,6 @@ class LibraryReportApp:
         self.load_date_bounds()
         self.update_report()
 
-    def create_cell(
-        self,
-        parent,
-        row,
-        col,
-        text,
-        bg_color="#FFFF00",
-        font_weight="normal",
-        align="w",
-    ):
-        lbl = tk.Label(
-            parent,
-            text=text,
-            bg=bg_color,
-            fg="#000000",
-            font=("Segoe UI", 10, font_weight),
-            bd=1,
-            relief="solid",
-            anchor=align,
-            padx=8,
-            pady=4,
-        )
-        lbl.grid(row=row, column=col, sticky="nsew")
-        return lbl
-
-    def get_date_str(self, date_widget):
-        """Helper to reliably extract YYYY-MM-DD from the DateEntry widget."""
-        val = date_widget.entry.get().strip()
-        try:
-            dt = datetime.strptime(val, "%Y-%m-%d")
-            return dt.strftime("%Y-%m-%d")
-        except ValueError:
-            return datetime.now().strftime("%Y-%m-%d")
-
     def update_report(self):
         sec_name = self.combo_section.get()
         sec_id = self.sections_map.get(sec_name, 100)
@@ -280,316 +345,216 @@ class LibraryReportApp:
         start_date = self.get_date_str(self.cal_start)
         end_date = self.get_date_str(self.cal_end)
 
-        for widget in self.table_frame.winfo_children():
-            widget.destroy()
-
         students, employees = fetch_report_data(sec_id, start_date, end_date)
 
-        # Cache variables for Excel exporter
+        # Cache variables for Excel export
         self.cached_students = students
         self.cached_employees = employees
         self.cached_section_name = sec_name
         self.cached_date_text = format_dynamic_date_range(start_date, end_date)
 
-        curr_row = 0
+        # Render Terminal Output
+        self.render_terminal_output(
+            sec_name, self.cached_date_text, students, employees
+        )
+
+    def get_date_str(self, date_widget):
+        val = date_widget.entry.get().strip()
+        try:
+            dt = datetime.strptime(val, "%Y-%m-%d")
+            return dt.strftime("%Y-%m-%d")
+        except ValueError:
+            return datetime.now().strftime("%Y-%m-%d")
+
+    def render_terminal_output(self, section_name, date_text, students, employees):
+        """Renders exact ASCII terminal grid box."""
+        self.terminal.config(state="normal")
+        self.terminal.delete("1.0", tk.END)
+
+        width = 62
+        border = "+" + "-" * (width - 2) + "+\n"
 
         # Header Block
-        self.create_cell(
-            self.table_frame, curr_row, 0, "Area:", font_weight="bold"
-        )
-        self.create_cell(
-            self.table_frame, curr_row, 1, sec_name, font_weight="bold"
-        )
-        self.create_cell(self.table_frame, curr_row, 2, "", bg_color="#FFFF00")
-        curr_row += 1
+        self.terminal.insert(tk.END, border, "cyan")
+        self.terminal.insert(tk.END, f"| Area: {section_name:<51} |\n", "cyan")
+        self.terminal.insert(tk.END, f"| Date: {date_text:<51} |\n", "cyan")
+        self.terminal.insert(tk.END, border, "cyan")
 
-        self.create_cell(
-            self.table_frame, curr_row, 0, "Date:", font_weight="bold"
-        )
-        self.create_cell(
-            self.table_frame,
-            curr_row,
-            1,
-            self.cached_date_text,
-            font_weight="bold",
-        )
-        self.create_cell(self.table_frame, curr_row, 2, "", bg_color="#FFFF00")
-        curr_row += 1
-
-        # Spacer
-        self.create_cell(self.table_frame, curr_row, 0, "", bg_color="#FFFFFF")
-        self.create_cell(self.table_frame, curr_row, 1, "", bg_color="#FFFFFF")
-        self.create_cell(self.table_frame, curr_row, 2, "", bg_color="#FFFFFF")
-        curr_row += 1
-
-        # Student Section
+        # Student Section Rows
         student_total = 0
         for code, count in students:
-            self.create_cell(self.table_frame, curr_row, 0, code)
-            self.create_cell(self.table_frame, curr_row, 1, "")
-            self.create_cell(
-                self.table_frame, curr_row, 2, f"{count:,}", align="e"
+            self.terminal.insert(
+                tk.END, f"| {code:<45} | {count:>10,} |\n", "white"
             )
             student_total += count
-            curr_row += 1
 
-        # Subtotal Row
-        self.create_cell(
-            self.table_frame,
-            curr_row,
-            0,
-            "TOTAL",
-            bg_color="#70AD47",
-            font_weight="bold",
+        self.terminal.insert(tk.END, border, "yellow")
+        self.terminal.insert(
+            tk.END, f"| {'TOTAL':<45} | {student_total:>10,} |\n", "yellow"
         )
-        self.create_cell(
-            self.table_frame, curr_row, 1, "", bg_color="#70AD47"
-        )
-        self.create_cell(
-            self.table_frame,
-            curr_row,
-            2,
-            f"{student_total:,}",
-            bg_color="#70AD47",
-            font_weight="bold",
-            align="e",
-        )
-        curr_row += 1
+        self.terminal.insert(tk.END, border, "yellow")
 
-        # Spacer
-        self.create_cell(self.table_frame, curr_row, 0, "", bg_color="#FFFFFF")
-        self.create_cell(self.table_frame, curr_row, 1, "", bg_color="#FFFFFF")
-        self.create_cell(self.table_frame, curr_row, 2, "", bg_color="#FFFFFF")
-        curr_row += 1
-
-        # Faculty / Staff Section
+        # Employee Section Rows
         employee_total = 0
         for code, count in employees:
-            self.create_cell(self.table_frame, curr_row, 0, code)
-            self.create_cell(self.table_frame, curr_row, 1, "")
-            self.create_cell(
-                self.table_frame, curr_row, 2, f"{count:,}", align="e"
+            self.terminal.insert(
+                tk.END, f"| {code:<45} | {count:>10,} |\n", "white"
             )
             employee_total += count
-            curr_row += 1
 
-        # Subtotal Row
-        self.create_cell(
-            self.table_frame,
-            curr_row,
-            0,
-            "TOTAL",
-            bg_color="#70AD47",
-            font_weight="bold",
-        )
-        self.create_cell(
-            self.table_frame, curr_row, 1, "", bg_color="#70AD47"
-        )
-        self.create_cell(
-            self.table_frame,
-            curr_row,
-            2,
-            f"{employee_total:,}",
-            bg_color="#70AD47",
-            font_weight="bold",
-            align="e",
-        )
-        curr_row += 1
-
-        # Spacer
-        self.create_cell(self.table_frame, curr_row, 0, "", bg_color="#FFFFFF")
-        self.create_cell(self.table_frame, curr_row, 1, "", bg_color="#FFFFFF")
-        self.create_cell(self.table_frame, curr_row, 2, "", bg_color="#FFFFFF")
-        curr_row += 1
+        if employees:
+            self.terminal.insert(tk.END, border, "green_bold")
+            self.terminal.insert(
+                tk.END,
+                f"| {'TOTAL':<45} | {employee_total:>10,} |\n",
+                "green_bold",
+            )
+            self.terminal.insert(tk.END, border, "green_bold")
 
         # Grand Total
         grand_total = student_total + employee_total
-        self.create_cell(
-            self.table_frame,
-            curr_row,
-            0,
-            "G.TOTAL",
-            bg_color="#FF0000",
-            font_weight="bold",
+        self.terminal.insert(
+            tk.END, f"| {'G.TOTAL':<45} | {grand_total:>10,} |\n", "red_bold"
         )
-        self.create_cell(
-            self.table_frame, curr_row, 1, "", bg_color="#FF0000"
-        )
-        self.create_cell(
-            self.table_frame,
-            curr_row,
-            2,
-            f"{grand_total:,}",
-            bg_color="#FF0000",
-            font_weight="bold",
-            align="e",
-        )
+        self.terminal.insert(tk.END, border, "red_bold")
+
+        self.terminal.config(state="disabled")
 
     def export_to_excel(self):
-        """Exports the current view into a styled .xlsx Excel spreadsheet."""
+        """Exports data using underscore formatting for filenames and tab names."""
         if not self.cached_students and not self.cached_employees:
             messagebox.showwarning(
                 "Warning", "No report data available to export."
             )
             return
 
+        clean_section = sanitize_with_underscores(self.cached_section_name)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        default_filename = f"{clean_section}_Library_Report_{timestamp}.xlsx"
+
         file_path = filedialog.asksaveasfilename(
             defaultextension=".xlsx",
             filetypes=[("Excel Files", "*.xlsx")],
             title="Save Library Statistics Report As",
-            initialfile=f"Library_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            initialfile=default_filename,
         )
 
         if not file_path:
             return
 
+        if os.path.isdir(file_path):
+            file_path = os.path.join(file_path, default_filename)
+
         try:
             wb = openpyxl.Workbook()
             ws = wb.active
-            ws.title = "Statistics Report"
+            ws.title = create_underscore_tab_name(self.cached_section_name)
+            ws.views.sheetView[0].showGridLines = True
 
-            # Use patternType and fgColor for maximum compatibility
-            fill_yellow = PatternFill(patternType="solid", fgColor="FFFF00")
-            fill_green = PatternFill(patternType="solid", fgColor="70AD47")
-            fill_red = PatternFill(patternType="solid", fgColor="FF0000")
-
-            font_bold = Font(name="Arial", size=10, bold=True)
-            font_normal = Font(name="Arial", size=10)
-
-            # Use border_style instead of style
-            thin_side = Side(border_style="thin", color="000000")
-            thin_border = Border(
-                left=thin_side,
-                right=thin_side,
-                top=thin_side,
-                bottom=thin_side,
-            )
+            font_bold = Font(name="Calibri", size=11, bold=True)
+            font_regular = Font(name="Calibri", size=11)
 
             align_left = Alignment(horizontal="left", vertical="center")
             align_right = Alignment(horizontal="right", vertical="center")
 
-            def style_cell(
-                    cell,
-                    value,
-                    fill=fill_yellow,
-                    font=font_normal,
-                    align=align_left,
+            try:
+                border_style = Side(border_style="thin", color="000000")
+                thin_border = Border(
+                    left=border_style,
+                    right=border_style,
+                    top=border_style,
+                    bottom=border_style,
+                )
+            except Exception:
+                thin_border = None
+
+            def apply_row(
+                row_idx,
+                col1_val,
+                col2_val,
+                col3_val,
+                bold=False,
+                num_format=False,
             ):
-                cell.value = value
-                cell.fill = fill
-                cell.font = font
-                cell.alignment = align
-                cell.border = thin_border
+                c1 = ws.cell(row=row_idx, column=1, value=col1_val)
+                c2 = ws.cell(row=row_idx, column=2, value=col2_val)
+                c3 = ws.cell(row=row_idx, column=3, value=col3_val)
+
+                for cell in (c1, c2, c3):
+                    if thin_border:
+                        cell.border = thin_border
+                    cell.font = font_bold if bold else font_regular
+
+                c1.alignment = align_left
+                c2.alignment = align_left
+                c3.alignment = align_right
+
+                if num_format and isinstance(col3_val, (int, float)):
+                    c3.number_format = "#,##0"
 
             current_r = 1
 
-            # Header
-            ws.row_dimensions[current_r].height = 20
-            style_cell(
-                ws.cell(row=current_r, column=1), "Area:", font=font_bold
+            # Header Rows
+            apply_row(
+                current_r, "Area:", self.cached_section_name, "", bold=True
             )
-            style_cell(
-                ws.cell(row=current_r, column=2),
-                self.cached_section_name,
-                font=font_bold,
-            )
-            style_cell(ws.cell(row=current_r, column=3), "")
             current_r += 1
 
-            ws.row_dimensions[current_r].height = 20
-            style_cell(
-                ws.cell(row=current_r, column=1), "Date:", font=font_bold
-            )
-            style_cell(
-                ws.cell(row=current_r, column=2),
-                self.cached_date_text,
-                font=font_bold,
-            )
-            style_cell(ws.cell(row=current_r, column=3), "")
-            current_r += 2
+            apply_row(current_r, "Date:", self.cached_date_text, "", bold=True)
+            current_r += 1
+
+            # Spacer
+            apply_row(current_r, "", "", "")
+            current_r += 1
 
             # Students
             student_tot = 0
             for code, count in self.cached_students:
-                ws.row_dimensions[current_r].height = 20
-                style_cell(ws.cell(row=current_r, column=1), code)
-                style_cell(ws.cell(row=current_r, column=2), "")
-                style_cell(
-                    ws.cell(row=current_r, column=3), count, align=align_right
-                )
+                apply_row(current_r, code, "", count, num_format=True)
                 student_tot += count
                 current_r += 1
 
-            # Subtotal
-            ws.row_dimensions[current_r].height = 20
-            style_cell(
-                ws.cell(row=current_r, column=1),
-                "TOTAL",
-                fill=fill_green,
-                font=font_bold,
+            apply_row(
+                current_r, "TOTAL", "", student_tot, bold=True, num_format=True
             )
-            style_cell(ws.cell(row=current_r, column=2), "", fill=fill_green)
-            style_cell(
-                ws.cell(row=current_r, column=3),
-                student_tot,
-                fill=fill_green,
-                font=font_bold,
-                align=align_right,
-            )
-            current_r += 2
+            current_r += 1
+
+            # Spacer
+            apply_row(current_r, "", "", "")
+            current_r += 1
 
             # Employees
             employee_tot = 0
             for code, count in self.cached_employees:
-                ws.row_dimensions[current_r].height = 20
-                style_cell(ws.cell(row=current_r, column=1), code)
-                style_cell(ws.cell(row=current_r, column=2), "")
-                style_cell(
-                    ws.cell(row=current_r, column=3), count, align=align_right
-                )
+                apply_row(current_r, code, "", count, num_format=True)
                 employee_tot += count
                 current_r += 1
 
-            # Subtotal
-            ws.row_dimensions[current_r].height = 20
-            style_cell(
-                ws.cell(row=current_r, column=1),
-                "TOTAL",
-                fill=fill_green,
-                font=font_bold,
-            )
-            style_cell(ws.cell(row=current_r, column=2), "", fill=fill_green)
-            style_cell(
-                ws.cell(row=current_r, column=3),
-                employee_tot,
-                fill=fill_green,
-                font=font_bold,
-                align=align_right,
-            )
-            current_r += 2
+            if self.cached_employees:
+                apply_row(
+                    current_r,
+                    "TOTAL",
+                    "",
+                    employee_tot,
+                    bold=True,
+                    num_format=True,
+                )
+                current_r += 1
+
+                apply_row(current_r, "", "", "")
+                current_r += 1
 
             # Grand Total
             grand_tot = student_tot + employee_tot
-            ws.row_dimensions[current_r].height = 20
-            style_cell(
-                ws.cell(row=current_r, column=1),
-                "G.TOTAL",
-                fill=fill_red,
-                font=font_bold,
-            )
-            style_cell(ws.cell(row=current_r, column=2), "", fill=fill_red)
-            style_cell(
-                ws.cell(row=current_r, column=3),
-                grand_tot,
-                fill=fill_red,
-                font=font_bold,
-                align=align_right,
+            apply_row(
+                current_r, "G.TOTAL", "", grand_tot, bold=True, num_format=True
             )
 
-            # Auto column widths
-            ws.column_dimensions["A"].width = 15
+            # Auto Column Widths
+            ws.column_dimensions["A"].width = 35
             ws.column_dimensions["B"].width = 30
-            ws.column_dimensions["C"].width = 15
+            ws.column_dimensions["C"].width = 18
 
             wb.save(file_path)
             messagebox.showinfo(
@@ -604,6 +569,6 @@ class LibraryReportApp:
 
 
 if __name__ == "__main__":
-    root = tb.Window(themename="flatly")
+    root = tb.Window(themename="darkly")
     app = LibraryReportApp(root)
     root.mainloop()
